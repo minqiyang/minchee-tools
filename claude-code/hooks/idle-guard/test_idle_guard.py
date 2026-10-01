@@ -16,6 +16,7 @@ class IdleGuardTest(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "IDLE_GUARD_STATE_DIR": self.state,
             "IDLE_GUARD_SECONDS": "3600",
+            "IDLE_GUARD_MIN_TOKENS": "0",
             "IDLE_GUARD_DISABLE": "",
             "IDLE_GUARD_MESSAGE_FILE": os.path.join(self.tmp.name, "missing.txt"),
             "IDLE_GUARD_CLEAR_HINT_FILE": "",
@@ -65,6 +66,70 @@ class IdleGuardTest(unittest.TestCase):
         os.environ["IDLE_GUARD_MESSAGE_FILE"] = path
         self.run_hook("stop", 0)
         self.assertEqual(json.loads(self.run_hook("prompt", 7200, prompt="go"))["reason"], "idle 120 min")
+
+    def write_transcript(self, *entries):
+        path = os.path.join(self.tmp.name, "transcript.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+        return path
+
+    @staticmethod
+    def assistant(tokens, sidechain=False):
+        usage = {"input_tokens": 2, "cache_read_input_tokens": tokens - 12, "cache_creation_input_tokens": 10,
+                 "output_tokens": 5}
+        return {"type": "assistant", "isSidechain": sidechain, "message": {"role": "assistant", "usage": usage}}
+
+    def test_token_threshold(self):
+        os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
+        self.run_hook("stop", 1000)
+        small = self.write_transcript(self.assistant(99999))
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go", transcript_path=small), "")
+        big = self.write_transcript(self.assistant(100000))
+        out = json.loads(self.run_hook("prompt", 9000, prompt="go", transcript_path=big))
+        self.assertEqual(out["decision"], "block")
+
+    def test_below_threshold_does_not_use_up_the_warning(self):
+        os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
+        self.run_hook("stop", 1000)
+        small = self.write_transcript(self.assistant(5000))
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go", transcript_path=small), "")
+        big = self.write_transcript(self.assistant(150000))
+        self.assertEqual(json.loads(self.run_hook("prompt", 9100, prompt="go", transcript_path=big))["decision"],
+                         "block")
+
+    def test_unknown_context_size_is_not_blocked(self):
+        os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
+        self.run_hook("stop", 1000)
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go"), "")
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go",
+                                       transcript_path=os.path.join(self.tmp.name, "nope.jsonl")), "")
+        empty = self.write_transcript({"type": "user", "message": {"role": "user", "content": "hi"}})
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go", transcript_path=empty), "")
+
+    def test_sidechain_is_ignored_and_latest_main_message_wins(self):
+        os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
+        self.run_hook("stop", 1000)
+        path = self.write_transcript(self.assistant(200000), self.assistant(5000),
+                                     self.assistant(300000, sidechain=True))
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go", transcript_path=path), "")
+
+    def test_compaction_marker_makes_the_size_unknown(self):
+        os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
+        self.run_hook("stop", 1000)
+        path = self.write_transcript(self.assistant(200000), {"type": "system", "subtype": "compact_boundary"})
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go", transcript_path=path), "")
+
+    def test_tokens_placeholder(self):
+        msg = os.path.join(self.tmp.name, "msg.txt")
+        with open(msg, "w", encoding="utf-8") as f:
+            f.write("{minutes} min, {tokens} tokens")
+        os.environ["IDLE_GUARD_MESSAGE_FILE"] = msg
+        os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
+        self.run_hook("stop", 0)
+        path = self.write_transcript(self.assistant(123456))
+        self.assertEqual(json.loads(self.run_hook("prompt", 7200, prompt="go", transcript_path=path))["reason"],
+                         "120 min, 123,456 tokens")
 
     def test_clear_hint_priority(self):
         self.assertEqual(self.run_hook("clear", 0), idle_guard.DEFAULT_CLEAR_HINT)

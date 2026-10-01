@@ -16,8 +16,8 @@ long pause, at zero token cost.
 - A `UserPromptSubmit` hook that blocks a prompt keeps it from the model entirely: no API call, no tokens
   ([hooks reference](https://code.claude.com/docs/en/hooks.md)).
 
-So the guard does the one useful thing a hook can do: it stops the first message after a long pause and
-tells you, so you can decide to `/clear` first.
+So the guard does the one useful thing a hook can do: it stops the first message after a long pause, when
+the context is big enough for the re-read to matter, and tells you, so you can decide to `/clear` first.
 
 These facts were checked against the official docs on 2026-09-30. Recheck them if Claude Code changes.
 
@@ -26,11 +26,14 @@ These facts were checked against the official docs on 2026-09-30. Recheck them i
 | Event | Behavior |
 |---|---|
 | `Stop` | Records when the session's last turn ended. Any turn refreshes the cache, including turns started by background-task notifications. |
-| `UserPromptSubmit` | If the last turn ended more than 1 hour ago, blocks your first message once and shows why. Send the same message again to go through. Slash commands are never blocked. |
+| `UserPromptSubmit` | If the last turn ended more than 1 hour ago **and** the context is at least 100K tokens, blocks your first message once and shows why. Send the same message again to go through. Slash commands are never blocked. |
 | `SessionStart` (matcher `clear`) | After `/clear`, tells the fresh session to rebuild its state from disk (memory files, handoff file). |
 
-It checks elapsed time only. It does not inspect the cache, the context size, or whether your work was
-saved, and its message says so. Whether `/clear` is safe is your call; the
+Context size is read from the session transcript: the newest main-thread assistant message's
+`input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, which is what the last request
+actually sent. Sub-agent messages are ignored. If the size cannot be determined (no transcript, no usage
+data, or a compaction happened after the last request), the prompt is not blocked. The guard does not
+inspect the cache itself or whether your work was saved, and its message says so. Whether `/clear` is safe is your call; the
 [checkpoint rule](../../rules/checkpoint-rule/README.md) makes that call easy.
 
 ## Install
@@ -55,8 +58,9 @@ To uninstall, remove the three entries whose command contains `idle_guard.py` fr
 |---|---|
 | `IDLE_GUARD_DISABLE` | unset; `1` turns the hook off for that session |
 | `IDLE_GUARD_SECONDS` | `3600` |
+| `IDLE_GUARD_MIN_TOKENS` | `100000`; `0` blocks on idle time alone |
 | `IDLE_GUARD_STATE_DIR` | `~/.claude/state/idle_guard` |
-| Block message | `IDLE_GUARD_MESSAGE_FILE`, else `~/.config/idle-guard/message.txt`, else built-in English. `{minutes}` is replaced. |
+| Block message | `IDLE_GUARD_MESSAGE_FILE`, else `~/.config/idle-guard/message.txt`, else built-in English. `{minutes}` and `{tokens}` are replaced. |
 | Hint after `/clear` | `IDLE_GUARD_CLEAR_HINT_FILE`, else `<project>/.claude/idle_guard_clear_hint.md`, else `~/.config/idle-guard/clear_hint.txt`, else built-in. |
 
 Environment variables can be set in the `env` block of a settings file. A message file is the easy way to

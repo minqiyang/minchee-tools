@@ -8,20 +8,24 @@ first message after a long pause and tells you, so you can choose /clear first.
 
 Modes (the last command-line argument):
   stop    Stop hook: record when this session's last turn ended.
-  prompt  UserPromptSubmit hook: if the last turn ended more than the idle limit ago, block the
-          first prompt once. A blocked prompt is never sent to the model, so it costs no tokens.
-          Sending the same prompt again goes through. Slash commands are never blocked.
+  prompt  UserPromptSubmit hook: if the last turn ended more than the idle limit ago and the context
+          is at least the token threshold, block the first prompt once. A blocked prompt is never sent
+          to the model, so it costs no tokens. Sending the same prompt again goes through. Slash
+          commands are never blocked.
   clear   SessionStart hook (matcher "clear"): print a resume hint for the fresh session.
 
-It checks elapsed time only. It does not inspect the cache, the context size, or whether your
-work was saved; the message says so.
+It checks elapsed time and the context size of the last request (read from the session transcript).
+It does not inspect the cache itself or whether your work was saved; the message says so. If the
+context size cannot be determined, the prompt is not blocked.
 
 Configuration (all optional):
   IDLE_GUARD_DISABLE          set to 1 to turn the hook off in a session (for example, background agents
                               that receive prompts from a script rather than a person)
   IDLE_GUARD_SECONDS          idle limit in seconds (default 3600)
+  IDLE_GUARD_MIN_TOKENS       only block when the context is at least this many tokens (default 100000;
+                              0 blocks on idle time alone)
   IDLE_GUARD_STATE_DIR        state directory (default ~/.claude/state/idle_guard)
-  IDLE_GUARD_MESSAGE_FILE     block message template; "{minutes}" is replaced
+  IDLE_GUARD_MESSAGE_FILE     block message template; "{minutes}" and "{tokens}" are replaced
                               (default file: ~/.config/idle-guard/message.txt)
   IDLE_GUARD_CLEAR_HINT_FILE  text printed after /clear; otherwise <project>/.claude/idle_guard_clear_hint.md,
                               then ~/.config/idle-guard/clear_hint.txt, then a built-in default
@@ -34,12 +38,14 @@ import time
 
 CONFIG_DIR = os.path.expanduser("~/.config/idle-guard")
 PRUNE_SECONDS = 30 * 24 * 3600
+TAIL_BYTES = 2 * 1024 * 1024
 
 DEFAULT_MESSAGE = (
     "About {minutes} minutes have passed since the last turn, which is past the idle limit, so the prompt "
-    "cache has probably expired (this check looks at time only, not at the cache). Continuing now may "
-    "re-read the whole context as uncached input. If the last turn said it is safe to /clear, run /clear "
-    "first and then ask to continue. Otherwise, or to continue anyway, send the same message again."
+    "cache has probably expired (this check looks at time and context size, not at the cache). Continuing "
+    "now may re-read the whole context (about {tokens} tokens) as uncached input. If the last turn said it "
+    "is safe to /clear, run /clear first and then ask to continue. Otherwise, or to continue anyway, send "
+    "the same message again."
 )
 
 DEFAULT_CLEAR_HINT = (
@@ -79,6 +85,46 @@ def _prune(state_dir, now):
             pass
 
 
+def _context_tokens(transcript_path):
+    """Context size of the session's latest main-thread request, or None if it cannot be determined.
+
+    Reads the tail of the transcript and takes the usage of the newest non-sidechain assistant message:
+    input + cache-read + cache-creation tokens. A compaction marker newer than that message makes the
+    number stale, so it also returns None.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(os.path.expanduser(str(transcript_path)), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("subtype") == "compact_boundary" or entry.get("isCompactSummary"):
+            return None
+        message = entry.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+        if entry.get("isSidechain") or not isinstance(usage, dict) or message.get("role") != "assistant":
+            continue
+        try:
+            total = sum(int(usage.get(k) or 0) for k in
+                        ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        except (TypeError, ValueError):
+            return None
+        if total > 0:
+            return total
+    return None
+
+
 def _clear_hint(data):
     candidates = [os.environ.get("IDLE_GUARD_CLEAR_HINT_FILE")]
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd")
@@ -109,6 +155,10 @@ def main(argv, stdin, now=None):
         idle_limit = float(os.environ.get("IDLE_GUARD_SECONDS", "3600"))
     except ValueError:
         idle_limit = 3600.0
+    try:
+        min_tokens = float(os.environ.get("IDLE_GUARD_MIN_TOKENS", "100000"))
+    except ValueError:
+        min_tokens = 100000.0
     last_path, warned_path = _state_paths(state_dir, data.get("session_id"))
 
     if mode == "stop":
@@ -131,11 +181,15 @@ def main(argv, stdin, now=None):
         idle = now - last
         if idle <= idle_limit or os.path.exists(warned_path):
             return ""
+        tokens = _context_tokens(data.get("transcript_path"))
+        if min_tokens > 0 and (tokens is None or tokens < min_tokens):
+            return ""
         os.makedirs(state_dir, exist_ok=True)
         open(warned_path, "w").close()
         template = (_read_text(os.environ.get("IDLE_GUARD_MESSAGE_FILE") or os.path.join(CONFIG_DIR, "message.txt"))
                     or DEFAULT_MESSAGE)
         reason = template.replace("{minutes}", str(int(idle // 60)))
+        reason = reason.replace("{tokens}", "{:,}".format(tokens) if tokens is not None else "unknown")
         return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
 
     if mode == "clear":
