@@ -31,13 +31,13 @@ These facts were checked against the official docs on 2026-09-30. Recheck them i
 
 It checks elapsed time only. It does not inspect the cache, the context size, or whether your work was
 saved, and its message says so. Whether `/clear` is safe is your call; the
-[checkpoint rule](../checkpoint-rule/README.md) makes that call easy.
+[checkpoint rule](../../rules/checkpoint-rule/README.md) makes that call easy.
 
 ## Install
 
 ```bash
 git clone https://github.com/minqiyang/minchee-tools.git
-cd minchee-tools/claude-code/idle-guard
+cd minchee-tools/claude-code/hooks/idle-guard
 ./install.sh ~/.claude/settings.json                         # all projects
 # or: ./install.sh /path/to/project/.claude/settings.local.json   # one project, not committed
 ```
@@ -53,6 +53,7 @@ To uninstall, remove the three entries whose command contains `idle_guard.py` fr
 
 | Setting | Default |
 |---|---|
+| `IDLE_GUARD_DISABLE` | unset; `1` turns the hook off for that session |
 | `IDLE_GUARD_SECONDS` | `3600` |
 | `IDLE_GUARD_STATE_DIR` | `~/.claude/state/idle_guard` |
 | Block message | `IDLE_GUARD_MESSAGE_FILE`, else `~/.config/idle-guard/message.txt`, else built-in English. `{minutes}` is replaced. |
@@ -62,6 +63,13 @@ Environment variables can be set in the `env` block of a settings file. A messag
 use your own language. A per-project hint file can name that project's handoff file and tools.
 
 State files older than 30 days are pruned automatically.
+
+## Background agents
+
+If a script sends prompts to a Claude Code session (for example, a coordinator that dispatches work to worker
+sessions), a worker idle for over an hour would have its next prompt blocked once. Start such sessions with
+`IDLE_GUARD_DISABLE=1` in their environment, or start a fresh session instead of reusing one idle that long. A fresh
+session has no state file and is never blocked.
 
 ## Test
 

@@ -4,7 +4,7 @@ A working rule for long-running Claude Code sessions, especially a coordinator s
 agents: keep the resume state on disk, so `/clear` loses nothing and a fresh session costs a few tens of
 thousands of tokens instead of a full re-read.
 
-It pairs with the [idle guard](../idle-guard/README.md), which tells you when a pause has made the next message
+It pairs with the [idle guard](../../hooks/idle-guard/README.md), which tells you when a pause has made the next message
 expensive.
 
 ## The rule

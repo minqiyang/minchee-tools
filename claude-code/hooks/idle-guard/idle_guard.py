@@ -17,6 +17,8 @@ It checks elapsed time only. It does not inspect the cache, the context size, or
 work was saved; the message says so.
 
 Configuration (all optional):
+  IDLE_GUARD_DISABLE          set to 1 to turn the hook off in a session (for example, background agents
+                              that receive prompts from a script rather than a person)
   IDLE_GUARD_SECONDS          idle limit in seconds (default 3600)
   IDLE_GUARD_STATE_DIR        state directory (default ~/.claude/state/idle_guard)
   IDLE_GUARD_MESSAGE_FILE     block message template; "{minutes}" is replaced
@@ -92,6 +94,8 @@ def _clear_hint(data):
 
 
 def main(argv, stdin, now=None):
+    if os.environ.get("IDLE_GUARD_DISABLE") == "1":
+        return ""
     now = time.time() if now is None else now
     mode = argv[-1] if len(argv) > 1 else ""
     try:

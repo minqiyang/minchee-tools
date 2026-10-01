@@ -16,6 +16,7 @@ class IdleGuardTest(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "IDLE_GUARD_STATE_DIR": self.state,
             "IDLE_GUARD_SECONDS": "3600",
+            "IDLE_GUARD_DISABLE": "",
             "IDLE_GUARD_MESSAGE_FILE": os.path.join(self.tmp.name, "missing.txt"),
             "IDLE_GUARD_CLEAR_HINT_FILE": "",
             "CLAUDE_PROJECT_DIR": os.path.join(self.tmp.name, "project"),
@@ -81,6 +82,14 @@ class IdleGuardTest(unittest.TestCase):
         last, warned = idle_guard._state_paths(self.state, "../../etc/x")
         self.assertEqual(os.path.dirname(last), self.state)
         self.assertEqual(os.path.dirname(warned), self.state)
+
+    def test_disable_switch(self):
+        self.run_hook("stop", 1000)
+        os.environ["IDLE_GUARD_DISABLE"] = "1"
+        self.assertEqual(self.run_hook("prompt", 9000, prompt="go"), "")
+        self.assertEqual(self.run_hook("clear", 9000), "")
+        del os.environ["IDLE_GUARD_DISABLE"]
+        self.assertEqual(json.loads(self.run_hook("prompt", 9000, prompt="go"))["decision"], "block")
 
     def test_bad_input_is_ignored(self):
         self.assertEqual(idle_guard.main(["x", "prompt"], io.StringIO("not json"), now=0), "")
