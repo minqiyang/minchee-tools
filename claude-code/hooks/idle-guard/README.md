@@ -60,7 +60,7 @@ To uninstall, remove the three entries whose command contains `idle_guard.py` fr
 | `IDLE_GUARD_SECONDS` | `3600` |
 | `IDLE_GUARD_MIN_TOKENS` | `100000`; `0` blocks on idle time alone |
 | `IDLE_GUARD_STATE_DIR` | `~/.claude/state/idle_guard` |
-| Block message | `IDLE_GUARD_MESSAGE_FILE`, else `~/.config/idle-guard/message.txt`, else built-in English. `{minutes}` and `{tokens}` are replaced. |
+| Block message | `IDLE_GUARD_MESSAGE_FILE`, else `~/.config/idle-guard/message.txt`, else built-in English. Replaced: `{minutes}` (idle minutes), `{limit}` (idle limit in minutes), `{tokens}` (context size in k, e.g. 406.9k). |
 | Hint after `/clear` | `IDLE_GUARD_CLEAR_HINT_FILE`, else `<project>/.claude/idle_guard_clear_hint.md`, else `~/.config/idle-guard/clear_hint.txt`, else built-in. |
 
 Environment variables can be set in the `env` block of a settings file. A message file is the easy way to

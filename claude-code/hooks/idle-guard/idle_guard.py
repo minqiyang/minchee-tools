@@ -25,8 +25,9 @@ Configuration (all optional):
   IDLE_GUARD_MIN_TOKENS       only block when the context is at least this many tokens (default 100000;
                               0 blocks on idle time alone)
   IDLE_GUARD_STATE_DIR        state directory (default ~/.claude/state/idle_guard)
-  IDLE_GUARD_MESSAGE_FILE     block message template; "{minutes}" and "{tokens}" are replaced
-                              (default file: ~/.config/idle-guard/message.txt)
+  IDLE_GUARD_MESSAGE_FILE     block message template (default file: ~/.config/idle-guard/message.txt).
+                              Replaced: "{minutes}" idle minutes; "{limit}" idle
+                              limit in minutes; "{tokens}" context size in k, one decimal (406.9k)
   IDLE_GUARD_CLEAR_HINT_FILE  text printed after /clear; otherwise <project>/.claude/idle_guard_clear_hint.md,
                               then ~/.config/idle-guard/clear_hint.txt, then a built-in default
 """
@@ -41,11 +42,10 @@ PRUNE_SECONDS = 30 * 24 * 3600
 TAIL_BYTES = 2 * 1024 * 1024
 
 DEFAULT_MESSAGE = (
-    "About {minutes} minutes have passed since the last turn, which is past the idle limit, so the prompt "
-    "cache has probably expired (this check looks at time and context size, not at the cache). Continuing "
-    "now may re-read the whole context (about {tokens} tokens) as uncached input. If the last turn said it "
-    "is safe to /clear, run /clear first and then ask to continue. Otherwise, or to continue anyway, send "
-    "the same message again."
+    "About {minutes} min since the last turn, past the {limit} min cache limit\n"
+    "Context is about {tokens} tokens.\n"
+    "Suggest: run /compact or /clear first.\n"
+    "To continue anyway, send the same message again."
 )
 
 DEFAULT_CLEAR_HINT = (
@@ -125,6 +125,10 @@ def _context_tokens(transcript_path):
     return None
 
 
+def _format_k(tokens):
+    return "{:.1f}k".format(tokens / 1000)
+
+
 def _clear_hint(data):
     candidates = [os.environ.get("IDLE_GUARD_CLEAR_HINT_FILE")]
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd")
@@ -189,7 +193,8 @@ def main(argv, stdin, now=None):
         template = (_read_text(os.environ.get("IDLE_GUARD_MESSAGE_FILE") or os.path.join(CONFIG_DIR, "message.txt"))
                     or DEFAULT_MESSAGE)
         reason = template.replace("{minutes}", str(int(idle // 60)))
-        reason = reason.replace("{tokens}", "{:,}".format(tokens) if tokens is not None else "unknown")
+        reason = reason.replace("{limit}", str(max(1, int(idle_limit / 60 + 0.5))))
+        reason = reason.replace("{tokens}", _format_k(tokens) if tokens is not None else "unknown")
         return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
 
     if mode == "clear":

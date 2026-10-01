@@ -43,7 +43,9 @@ class IdleGuardTest(unittest.TestCase):
         self.run_hook("stop", 1000)
         out = json.loads(self.run_hook("prompt", 1000 + 4000, prompt="go"))
         self.assertEqual(out["decision"], "block")
-        self.assertIn("66 minutes", out["reason"])
+        self.assertIn("About 66 min", out["reason"])
+        self.assertIn("60 min cache limit", out["reason"])
+        self.assertIn("/compact", out["reason"])
         self.assertEqual(self.run_hook("prompt", 1000 + 4010, prompt="go"), "")
 
     def test_next_turn_resets_the_warning(self):
@@ -123,13 +125,17 @@ class IdleGuardTest(unittest.TestCase):
     def test_tokens_placeholder(self):
         msg = os.path.join(self.tmp.name, "msg.txt")
         with open(msg, "w", encoding="utf-8") as f:
-            f.write("{minutes} min, {tokens} tokens")
+            f.write("{minutes} min, limit {limit}, {tokens}")
         os.environ["IDLE_GUARD_MESSAGE_FILE"] = msg
         os.environ["IDLE_GUARD_MIN_TOKENS"] = "100000"
         self.run_hook("stop", 0)
         path = self.write_transcript(self.assistant(123456))
         self.assertEqual(json.loads(self.run_hook("prompt", 7200, prompt="go", transcript_path=path))["reason"],
-                         "120 min, 123,456 tokens")
+                         "120 min, limit 60, 123.5k")
+
+    def test_tokens_shown_in_k_with_one_decimal(self):
+        self.assertEqual(idle_guard._format_k(406923), "406.9k")
+        self.assertEqual(idle_guard._format_k(100000), "100.0k")
 
     def test_clear_hint_priority(self):
         self.assertEqual(self.run_hook("clear", 0), idle_guard.DEFAULT_CLEAR_HINT)
