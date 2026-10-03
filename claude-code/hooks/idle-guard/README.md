@@ -16,8 +16,13 @@ long pause, at zero token cost.
 - A `UserPromptSubmit` hook that blocks a prompt keeps it from the model entirely: no API call, no tokens
   ([hooks reference](https://code.claude.com/docs/en/hooks.md)).
 
-So the guard does the one useful thing a hook can do: it stops the first message after a long pause, when
-the context is big enough for the re-read to matter, and tells you, so you can decide to `/clear` first.
+So the guard does the two useful things a hook can do:
+
+1. **Before the cache expires** it sends a desktop notification, so you can `/compact` while the cache is
+   still warm. Compacting reads the whole context once either way, but a warm read is cached input (far
+   cheaper) and leaves a small summary, so the cold re-read after the pause is small too.
+2. **If the cache expires anyway** it stops the first message after the pause, when the context is big enough
+   for the re-read to matter, and tells you, so you can decide to `/clear` first.
 
 These facts were checked against the official docs on 2026-09-30. Recheck them if Claude Code changes.
 
@@ -25,9 +30,23 @@ These facts were checked against the official docs on 2026-09-30. Recheck them i
 
 | Event | Behavior |
 |---|---|
-| `Stop` | Records when the session's last turn ended. Any turn refreshes the cache, including turns started by background-task notifications. |
+| `Stop` | Records when the session's last turn ended. Any turn refreshes the cache, including turns started by background-task notifications. Also keeps one background timer running per Claude Code process (see below). |
 | `UserPromptSubmit` | If the last turn ended more than 1 hour ago **and** the context is at least 100K tokens, blocks your first message once and shows why. Send the same message again to go through. Slash commands are never blocked. |
-| `SessionStart` (matcher `clear`) | After `/clear`, tells the fresh session to rebuild its state from disk (memory files, handoff file). |
+| `SessionStart` (matcher `clear`) | After `/clear`, tells the fresh session to rebuild its state from disk (memory files, handoff file), and stops the timer. |
+
+### The notification
+
+After a turn ends, a small detached timer waits. If 50 minutes pass with no new activity and the context is at
+least 100K tokens, it sends one notification, for example: "Cache expires in about 10 min. Context is about
+406.9k tokens. Run /compact now?". It does not run anything for you.
+
+- New activity (a new turn, or any write to the session transcript) pushes the notification back.
+- The timer exits quietly when Claude Code quits, after `/clear`, if the context is below the threshold or
+  was already compacted, or if the cache has already expired (the blocking guard handles that case).
+- There is at most one timer per Claude Code process, found by walking up from the hook to the `claude`
+  process. If that process cannot be found, no timer starts.
+- macOS uses `osascript`; the first time, you may need to allow notifications for Script Editor in System
+  Settings. Linux uses `notify-send` if it is installed; otherwise no notification is sent.
 
 Context size is read from the session transcript: the newest main-thread assistant message's
 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, which is what the last request
@@ -58,7 +77,8 @@ To uninstall, remove the three entries whose command contains `idle_guard.py` fr
 |---|---|
 | `IDLE_GUARD_DISABLE` | unset; `1` turns the hook off for that session |
 | `IDLE_GUARD_SECONDS` | `3600` |
-| `IDLE_GUARD_MIN_TOKENS` | `100000`; `0` blocks on idle time alone |
+| `IDLE_GUARD_NOTIFY_SECONDS` | `3000` (50 minutes); `0` turns the notification off |
+| `IDLE_GUARD_MIN_TOKENS` | `100000`; `0` acts on idle time alone |
 | `IDLE_GUARD_STATE_DIR` | `~/.claude/state/idle_guard` |
 | Block message | `IDLE_GUARD_MESSAGE_FILE`, else `~/.config/idle-guard/message.txt`, else built-in English. Replaced: `{minutes}` (idle minutes), `{limit}` (idle limit in minutes), `{tokens}` (context size in k, e.g. 406.9k). |
 | Hint after `/clear` | `IDLE_GUARD_CLEAR_HINT_FILE`, else `<project>/.claude/idle_guard_clear_hint.md`, else `~/.config/idle-guard/clear_hint.txt`, else built-in. |

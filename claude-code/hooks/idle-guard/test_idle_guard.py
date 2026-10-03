@@ -25,8 +25,11 @@ class IdleGuardTest(unittest.TestCase):
         self.env.start()
         self.config = mock.patch.object(idle_guard, "CONFIG_DIR", os.path.join(self.tmp.name, "config"))
         self.config.start()
+        self.no_claude = mock.patch.object(idle_guard, "_claude_pid", return_value=None)
+        self.no_claude.start()
 
     def tearDown(self):
+        self.no_claude.stop()
         self.config.stop()
         self.env.stop()
         self.tmp.cleanup()
@@ -45,7 +48,7 @@ class IdleGuardTest(unittest.TestCase):
         self.assertEqual(out["decision"], "block")
         self.assertIn("About 66 min", out["reason"])
         self.assertIn("60 min cache limit", out["reason"])
-        self.assertIn("/compact", out["reason"])
+        self.assertIn("Suggest: run /clear first.", out["reason"])
         self.assertEqual(self.run_hook("prompt", 1000 + 4010, prompt="go"), "")
 
     def test_next_turn_resets_the_warning(self):
@@ -136,6 +139,121 @@ class IdleGuardTest(unittest.TestCase):
     def test_tokens_shown_in_k_with_one_decimal(self):
         self.assertEqual(idle_guard._format_k(406923), "406.9k")
         self.assertEqual(idle_guard._format_k(100000), "100.0k")
+
+    # --- notification timer ---
+
+    def arm(self, transcript=None, last=0, session="s1", claude_pid=4242):
+        """Write the state a stop hook would leave behind for a Claude Code process."""
+        os.makedirs(self.state, exist_ok=True)
+        with open(idle_guard._state_paths(self.state, session)[0], "w") as f:
+            f.write(str(last))
+        idle_guard._atomic_write(idle_guard._proc_path(self.state, claude_pid), json.dumps(
+            {"session_id": session, "transcript_path": transcript, "timer_pid": None}))
+
+    def run_timer(self, start=0, min_tokens=100000, on_sleep=None, claude_alive=True):
+        clock = {"now": start}
+        sent = []
+
+        def sleep(seconds):
+            clock["now"] += seconds
+            if on_sleep:
+                on_sleep(clock)
+
+        with mock.patch.object(idle_guard, "_pid_alive", return_value=claude_alive):
+            idle_guard.run_timer(4242, self.state, 3000, 3600, min_tokens, clock=lambda: clock["now"], sleep=sleep,
+                                 notify=lambda title, body: sent.append((title, body)))
+        return sent, clock["now"]
+
+    def old_transcript(self, tokens):
+        path = self.write_transcript(self.assistant(tokens))
+        os.utime(path, (0, 0))
+        return path
+
+    def test_timer_notifies_at_the_notify_time(self):
+        self.arm(self.old_transcript(406923))
+        sent, waited_until = self.run_timer(start=100)
+        self.assertEqual(waited_until, 3000)
+        self.assertEqual(sent, [("Idle guard",
+                                 "Cache expires in about 10 min. Context is about 406.9k tokens. Run /compact now?")])
+
+    def test_timer_is_pushed_back_by_new_activity(self):
+        self.arm(self.old_transcript(200000))
+
+        def new_turn(clock):
+            if clock["now"] == 3000:  # a turn ended just before the first notification time
+                with open(idle_guard._state_paths(self.state, "s1")[0], "w") as f:
+                    f.write("2900")
+
+        sent, waited_until = self.run_timer(start=100, on_sleep=new_turn)
+        self.assertEqual(waited_until, 5900)
+        self.assertEqual(len(sent), 1)
+
+    def test_timer_stays_quiet_when_it_should(self):
+        small = self.old_transcript(5000)
+        self.arm(small)
+        self.assertEqual(self.run_timer(start=100)[0], [])  # context below the threshold
+        self.arm(self.old_transcript(200000))
+        self.assertEqual(self.run_timer(start=4000)[0], [])  # cache already expired
+        self.assertEqual(self.run_timer(start=100, claude_alive=False)[0], [])  # Claude Code has exited
+        os.remove(idle_guard._proc_path(self.state, 4242))
+        self.assertEqual(self.run_timer(start=100)[0], [])  # session cleared
+
+    def test_timer_skips_a_compacted_context(self):
+        path = self.write_transcript(self.assistant(200000), {"type": "system", "subtype": "compact_boundary"})
+        os.utime(path, (0, 0))
+        self.arm(path)
+        self.assertEqual(self.run_timer(start=100)[0], [])
+
+    def test_stop_starts_one_timer_per_claude_process(self):
+        spawned = []
+        with mock.patch.object(idle_guard, "_claude_pid", return_value=4242), \
+                mock.patch.object(idle_guard, "_spawn_timer", side_effect=lambda pid: spawned.append(pid) or 777), \
+                mock.patch.object(idle_guard, "_is_timer", side_effect=lambda pid: pid == 777):
+            self.run_hook("stop", 1000, transcript_path="/t.jsonl")
+            self.run_hook("stop", 1100, session_id="s1", transcript_path="/t.jsonl")
+        self.assertEqual(spawned, [4242])
+        info = idle_guard._read_json(idle_guard._proc_path(self.state, 4242))
+        self.assertEqual((info["session_id"], info["transcript_path"], info["timer_pid"]), ("s1", "/t.jsonl", 777))
+
+    def test_notify_switch_and_unknown_claude_process(self):
+        with mock.patch.object(idle_guard, "_spawn_timer") as spawn:
+            with mock.patch.object(idle_guard, "_claude_pid", return_value=4242):
+                os.environ["IDLE_GUARD_NOTIFY_SECONDS"] = "0"
+                self.run_hook("stop", 1000)
+                os.environ["IDLE_GUARD_NOTIFY_SECONDS"] = "3600"  # not before the cache expires
+                self.run_hook("stop", 1000)
+                del os.environ["IDLE_GUARD_NOTIFY_SECONDS"]
+            self.run_hook("stop", 1000)  # no Claude Code process found (setUp patch)
+            spawn.assert_not_called()
+
+    def test_clear_stops_the_timer(self):
+        self.arm()
+        with mock.patch.object(idle_guard, "_claude_pid", return_value=4242):
+            self.run_hook("clear", 0)
+        self.assertFalse(os.path.exists(idle_guard._proc_path(self.state, 4242)))
+
+    def test_claude_pid_walks_up_to_the_claude_process(self):
+        lines = {"10": (20, "/bin/sh -c python3 idle_guard.py stop"), "20": (30, "claude --resume x"),
+                 "30": (1, "-zsh")}
+        self.no_claude.stop()
+        try:
+            with mock.patch.object(idle_guard.os, "getppid", return_value=10), \
+                    mock.patch.object(idle_guard, "_process_line", side_effect=lambda pid: lines.get(str(pid))):
+                self.assertEqual(idle_guard._claude_pid(), 20)
+            with mock.patch.object(idle_guard.os, "getppid", return_value=30), \
+                    mock.patch.object(idle_guard, "_process_line", side_effect=lambda pid: lines.get(str(pid))):
+                self.assertIsNone(idle_guard._claude_pid())
+        finally:
+            self.no_claude.start()
+
+    def test_notification_is_passed_as_arguments(self):
+        with mock.patch.object(idle_guard.sys, "platform", "darwin"), \
+                mock.patch.object(idle_guard.shutil, "which", return_value="/usr/bin/osascript"), \
+                mock.patch.object(idle_guard.subprocess, "run") as run:
+            idle_guard._notify('T"itle', 'body" & quit')
+        command = run.call_args[0][0]
+        self.assertEqual(command[0], "osascript")
+        self.assertEqual(command[-2:], ['body" & quit', 'T"itle'])
 
     def test_clear_hint_priority(self):
         self.assertEqual(self.run_hook("clear", 0), idle_guard.DEFAULT_CLEAR_HINT)
